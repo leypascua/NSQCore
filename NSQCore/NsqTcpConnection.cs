@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using NSQCore.Commands;
 using NSQCore.System;
+using System.Diagnostics;
 
 namespace NSQCore
 {
@@ -40,6 +41,7 @@ namespace NSQCore
         private int _started;
         private readonly object _disposeLock = new object();
         private bool _disposed;
+        private bool _isRunning;
 
         internal void OnInternalMessage(string format, object arg0)
         {
@@ -88,6 +90,7 @@ namespace NSQCore
             if (wasStarted != 0) return;
 
             OnInternalMessage("Worker thread starting");
+            _isRunning = true;
             _workerThread.Start(handler);
             OnInternalMessage("Worker thread started");
         }
@@ -100,6 +103,21 @@ namespace NSQCore
                 _disposed = true;
                 _connectionClosedSource.Cancel();
                 _connectionClosedSource.Dispose();
+
+                _isRunning = false;
+
+                if (_workerThread != null)
+                {
+                    try
+                    {
+                        _workerThread.Interrupt();
+                        if (!_workerThread.Join(1))
+                        {
+                            _workerThread.Abort();
+                        }
+                    }
+                    catch (ThreadAbortException) { }
+                }
             }
         }
 
@@ -162,7 +180,7 @@ namespace NSQCore
             IBackoffLimiter backoffLimiter = null;
             IDisposable cancellationRegistration = Disposable.Empty;
 
-            while (true)
+            while (_isRunning)
             {
                 try
                 {
@@ -241,6 +259,17 @@ namespace NSQCore
                         }
                     }
 
+                    if (!_isRunning)
+                    {
+                        _stream.Close();
+                        _stream.Dispose();
+                        _stream = null;
+                        Thread.CurrentThread.Abort();
+                        return;
+                    }
+
+                    Trace.WriteLine("Reading next frame...");
+
                     Frame frame;
                     while ((frame = reader.ReadFrame()) != null)
                     {
@@ -292,7 +321,18 @@ namespace NSQCore
                             OnInternalMessage("Unknown message type: {0}", frame.Type);
                             throw new InvalidOperationException("Unknown message type " + frame.Type);
                         }
+
+                        if (!_isRunning)
+                        {   
+                            _stream.Close();
+                            _stream.Dispose();
+                            _stream = null;
+                            Thread.CurrentThread.Abort();
+                            return;
+                        }
                     }
+
+                    Trace.WriteLine("No more frames. Next loop");
                 }
                 catch (ObjectDisposedException ex)
                 {
